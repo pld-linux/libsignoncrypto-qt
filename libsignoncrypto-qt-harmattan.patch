@@ -1,0 +1,471 @@
+--- libsignoncrypto-qt-1.3.orig/lib/SignOnCrypto/SignOnCrypto.pro
++++ libsignoncrypto-qt-1.3/lib/SignOnCrypto/SignOnCrypto.pro
+@@ -7,20 +7,29 @@
+ HEADERS = \
+     common.h \
+     debug.h \
+-    encryptor.h
++    encryptor.h \
++    encryptor-glib.h
+ 
+ INCLUDEPATH += . \
+                $$TOP_SRC_DIR/include
+ 
+-QT += core 
++QT += core
+ QT -= gui
+ 
++PKGCONFIG += \
++    gobject-2.0 \
++    glib-2.0 \
++    dbus-glib-1
++
+ CONFIG += build_all \
+           link_pkgconfig debug
+-          
++
+ QMAKE_CXXFLAGS += -fno-exceptions \
+                   -fno-rtti
+ 
++SOURCES += \
++    encryptor-glib.cpp
++
+ system(pkg-config --exists aegis-crypto) {
+     PKGCONFIG += aegis-crypto
+     DEFINES += HAVE_AEGIS_CRYPTO
+@@ -35,7 +44,8 @@
+ headers.files = \ 
+     common.h \
+     Encryptor \
+-    encryptor.h
++    encryptor.h \
++    encryptor-glib.h
+ 
+ headers.path = $${INSTALL_PREFIX}/include/signoncrypto-qt/SignOnCrypto
+ INSTALLS += headers
+@@ -43,3 +53,4 @@
+ pkgconfig.files = libsignoncrypto-qt.pc
+ pkgconfig.path = $${INSTALL_PREFIX}/lib/pkgconfig
+ INSTALLS += pkgconfig
++
+--- libsignoncrypto-qt-1.3.orig/lib/SignOnCrypto/encryptor-glib.h
++++ libsignoncrypto-qt-1.3/lib/SignOnCrypto/encryptor-glib.h
+@@ -0,0 +1,86 @@
++/*
++ * This file is part of signoncrypto-qt
++ *
++ * Copyright (C) 2009-2010 Nokia Corporation.
++ *
++ * Contact: Alberto Mardegan <alberto.mardegan@nokia.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License
++ * version 2.1 as published by the Free Software Foundation.
++ *
++ * This library is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#ifndef ENCRYPTOR_GLIB_H
++#define ENCRYPTOR_GLIB_H
++
++#include <glib-object.h>
++
++/**
++ * Encrypts contents of a hash table
++ * @param map The GHashTable whose contents to encrypt
++ * @param encrypted_map Pointer to a GHashTable that receives
++ *        the encrypted data
++ * @param pid Identifier of the process whose resource token
++ *        to use for encryption. Pass 0 to use current process
++ * @return 0 on success, non-zero on failure
++ */
++#ifdef __cplusplus
++extern "C"
++#endif
++int signon_encrypt_hash_table(const GHashTable *map, GHashTable *encrypted_map, pid_t pid);
++/**
++ * Decrypts contents of a hash table
++ * @param map The GHashTable whose contents to decrypt
++ * @param decrypted_map Pointer to a GHashTable that receives
++ *        the decrypted data
++ * @param pid Identifier of the process whose resource token
++ *        to use for decryption. Pass 0 to use current process
++ * @return 0 on success, non-zero on failure
++ */
++#ifdef __cplusplus
++extern "C"
++#endif
++int signon_decrypt_hash_table(const GHashTable *map, GHashTable *decrypted_map, pid_t pid);
++
++/**
++ * Encrypts a string
++ * @param string The string to encrypt. The character
++*         encoding of the string must be UTF-8
++ * @param encrypted_string Pointer to a pointer to receive
++ *        the encrypted string. The caller must release this
++ *        buffer using g_free
++ * @param pid Identifier of the process whose resource token
++ *        to use for encryption. Pass 0 to use current process
++ * @return 0 on success, non-zero on failure
++ */
++#ifdef __cplusplus
++extern "C"
++#endif
++int signon_encrypt_string(const gchar *string, gchar **encrypted_string, pid_t pid);
++/**
++ * Decrypts a string
++ * @param string The string to decrypt
++ * @param decrypted_string Pointer to a pointer to receive
++ *        the decrypted string. The string will be UTF-8
++*         encoded. The caller must release this buffer using
++*         g_free
++ * @param pid Identifier of the process whose resource token
++ *        to use for decryption. Pass 0 to use current process
++ * @return 0 on success, non-zero on failure
++ */
++#ifdef __cplusplus
++extern "C"
++#endif
++int signon_decrypt_string(const gchar *string, gchar **decrypted_string, pid_t pid);
++
++#endif // ENCRYPTOR_GLIB_H
+--- libsignoncrypto-qt-1.3.orig/lib/SignOnCrypto/encryptor-glib.cpp
++++ libsignoncrypto-qt-1.3/lib/SignOnCrypto/encryptor-glib.cpp
+@@ -0,0 +1,290 @@
++/*
++ * This file is part of signoncrypto
++ *
++ * Copyright (C) 2010-2011 Nokia Corporation.
++ *
++ * Contact: Alberto Mardegan <alberto.mardegan@nokia.com>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License
++ * version 2.1 as published by the Free Software Foundation.
++ *
++ * This library is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
++ * 02110-1301 USA
++ */
++
++#include "encryptor-glib.h"
++#include "encryptor.h"
++#include <dbus/dbus-glib.h>
++
++static int internal_signon_encrypt_hash_table(const GHashTable *map, GHashTable *encrypted_map, pid_t pid);
++static int internal_signon_decrypt_hash_table(const GHashTable *map, GHashTable *decrypted_map, pid_t pid);
++static int internal_signon_encrypt_string(const gchar *string, gchar **encrypted_string, pid_t pid);
++static int internal_signon_decrypt_string(const gchar *string, gchar **decrypted_string, pid_t pid);
++static bool gHashTableToQVariantMap(const GHashTable *map, QVariantMap &new_map);
++static bool qVariantMapToGHashTable(const QVariantMap &map, GHashTable *new_map);
++
++extern "C"
++{
++int signon_encrypt_hash_table(const GHashTable *map, GHashTable *encrypted_map, pid_t pid)
++{
++    return internal_signon_encrypt_hash_table(map, encrypted_map, pid);
++}
++
++int signon_decrypt_hash_table(const GHashTable *map, GHashTable *decrypted_map, pid_t pid)
++{
++    return internal_signon_decrypt_hash_table(map, decrypted_map, pid);
++}
++
++int signon_encrypt_string(const gchar *string, gchar **encrypted_string, pid_t pid)
++{
++    return internal_signon_encrypt_string(string, encrypted_string, pid);
++}
++
++int signon_decrypt_string(const gchar *string, gchar **decrypted_string, pid_t pid)
++{
++    return internal_signon_decrypt_string(string, decrypted_string, pid);
++}
++}
++
++using namespace SignOnCrypto;
++
++static void signon_free_gvalue (gpointer val)
++{
++    g_return_if_fail(G_IS_VALUE(val));
++    GValue *value = (GValue*)val;
++
++    g_value_unset (value);
++    g_slice_free (GValue, value);
++}
++
++static GType signon_type_dbus_hash_sv()
++{
++    static GType t = 0;
++
++    if (G_UNLIKELY(t == 0))
++        t = dbus_g_type_get_map("GHashTable", G_TYPE_STRING, G_TYPE_VALUE);
++    return t;
++}
++
++static GValue *gValueFromQVariant(const QVariant &variant)
++{
++    GValue *gvalue = g_slice_new0(GValue);
++
++    switch (variant.type()) {
++    case QVariant::ByteArray: {
++        QByteArray qba = variant.toByteArray();
++        GArray *arr = g_array_sized_new(FALSE, FALSE, 1, qba.length());
++        if (qba.length() > 0)
++            g_array_append_vals(arr, qba.constData(), qba.length());
++        g_value_init(gvalue, DBUS_TYPE_G_UCHAR_ARRAY);
++        g_value_take_boxed(gvalue, arr);
++        break;
++    }
++    case QVariant::Map:
++        {
++            GHashTable *gMap =
++                g_hash_table_new_full(g_str_hash, g_str_equal,
++                                      g_free, signon_free_gvalue);
++            if (!qVariantMapToGHashTable(variant.toMap(), gMap)) {
++                g_slice_free(GValue, gvalue);
++                return 0;
++            }
++            g_value_init(gvalue, G_TYPE_HASH_TABLE);
++            g_value_take_boxed(gvalue, gMap);
++        }
++        break;
++    case QVariant::Bool:
++        g_value_init(gvalue, G_TYPE_BOOLEAN);
++        g_value_set_boolean(gvalue, variant.value<gboolean>());
++        break;
++    case QVariant::Char:
++        g_value_init(gvalue, G_TYPE_CHAR);
++        g_value_set_char(gvalue, variant.value<char>());
++        break;
++    case QVariant::Double:
++        g_value_init(gvalue, G_TYPE_DOUBLE);
++        g_value_set_double(gvalue, variant.value<gdouble>());
++        break;
++    case QVariant::Int:
++        g_value_init(gvalue, G_TYPE_INT);
++        g_value_set_int(gvalue, variant.value<gint>());
++        break;
++    case QVariant::LongLong:
++        g_value_init(gvalue, G_TYPE_INT64);
++        g_value_set_int64(gvalue, variant.value<gint64>());
++        break;
++    case QVariant::String:
++        g_value_init(gvalue, G_TYPE_STRING);
++        g_value_set_string(gvalue, variant.value<QString>().toUtf8().constData());
++        break;
++    case QVariant::UInt:
++        g_value_init(gvalue, G_TYPE_UINT);
++        g_value_set_uint(gvalue, variant.value<guint>());
++        break;
++    case QVariant::ULongLong:
++        g_value_init(gvalue, G_TYPE_UINT64);
++        g_value_set_uint64(gvalue, variant.value<guint64>());
++        break;
++    default:
++        g_warning("%s: cannot convert QVariant type %s", G_STRFUNC,
++                  variant.typeName());
++        g_slice_free(GValue, gvalue);
++        return 0;
++    }
++
++    return gvalue;
++}
++
++static QVariant gValueToQVariant(GValue *gvalue)
++{
++    if (G_VALUE_TYPE(gvalue) ==
++            DBUS_TYPE_G_UCHAR_ARRAY) {
++        GArray *array = (GArray *)g_value_get_boxed(gvalue);
++        return QVariant(QByteArray(array->data, array->len));
++    } else if (dbus_g_type_is_map(G_VALUE_TYPE(gvalue))) {
++        GHashTable *gMap = (GHashTable *)g_value_get_boxed(gvalue);
++        QVariantMap qMap;
++        if (!gHashTableToQVariantMap(gMap, qMap))
++            return QVariant();
++
++        return QVariant::fromValue<QVariantMap>(qMap);
++    }
++
++    switch(G_VALUE_TYPE(gvalue)) {
++    case G_TYPE_BOOLEAN:
++        return QVariant::fromValue<bool>(g_value_get_boolean(gvalue));
++    case G_TYPE_CHAR:
++        return QVariant::fromValue<char>(g_value_get_char(gvalue));
++    case G_TYPE_DOUBLE:
++        return QVariant::fromValue<double>(g_value_get_double(gvalue));
++    case G_TYPE_FLOAT:
++        return QVariant::fromValue<float>(g_value_get_float(gvalue));
++    case G_TYPE_INT:
++        return QVariant::fromValue<int>(g_value_get_int(gvalue));
++    case G_TYPE_INT64:
++        return QVariant::fromValue<qint64>(g_value_get_int64(gvalue));
++    case G_TYPE_LONG:
++        return QVariant::fromValue<long>(g_value_get_long(gvalue));
++    case G_TYPE_STRING:
++        return QVariant(QString::fromUtf8(g_value_get_string(gvalue)));
++    case G_TYPE_UCHAR:
++        return QVariant::fromValue<uchar>(g_value_get_uchar(gvalue));
++    case G_TYPE_UINT:
++        return QVariant::fromValue<uint>(g_value_get_uint(gvalue));
++    case G_TYPE_UINT64:
++        return QVariant::fromValue<quint64>(g_value_get_uint64(gvalue));
++    case G_TYPE_ULONG:
++        return QVariant::fromValue<unsigned long>(g_value_get_ulong(gvalue));
++    default:
++        g_warning("%s: Cannot convert type %s", G_STRFUNC, G_VALUE_TYPE_NAME(gvalue));
++        return QVariant();
++    }
++}
++
++static void gValueIntoQVariantMap(gchar *key, GValue *value, QVariantMap *dest)
++{
++    QString qkey = QString::fromUtf8(key);
++    QVariant qvalue = gValueToQVariant(value);
++    if (qvalue.isValid()) {
++        dest->insert(qkey, qvalue);
++    }
++}
++
++static bool gHashTableToQVariantMap(const GHashTable *map, QVariantMap &new_map)
++{
++    g_hash_table_foreach((GHashTable *)map, (GHFunc)gValueIntoQVariantMap, &new_map);
++    // new_map only contains items that we could successfully
++    // convert from GValue to QVariant. If the map sizes don't
++    // match return false to indicate failure
++    return (guint)new_map.size() == g_hash_table_size((GHashTable *)map);
++}
++
++static bool qVariantMapToGHashTable(const QVariantMap &map, GHashTable *new_map)
++{
++    QMapIterator<QString, QVariant> i(map);
++    while (i.hasNext()) {
++        i.next();
++        g_hash_table_insert(new_map,
++                            g_strdup(i.key().toUtf8().constData()),
++                            gValueFromQVariant(i.value()));
++    }
++    return (guint)map.size() == g_hash_table_size((GHashTable *)new_map);
++}
++
++static int internal_signon_encrypt_hash_table(const GHashTable *map, GHashTable *encrypted_map, pid_t pid)
++{
++    QVariantMap qmap;
++    if (!gHashTableToQVariantMap(map, qmap))
++        return Encryptor::SerializationTypeIsNotSupported;
++
++    Encryptor encryptor;
++    QVariantMap qencrypted_map = encryptor.encodeVariantMap(qmap, pid);
++    if (encryptor.status() != Encryptor::Ok)
++        return (int)encryptor.status();
++
++    if (!qVariantMapToGHashTable(qencrypted_map, encrypted_map))
++        return Encryptor::SerializationTypeIsNotSupported;
++
++    return 0;
++}
++
++static int internal_signon_decrypt_hash_table(const GHashTable *map, GHashTable *decrypted_map, pid_t pid)
++{
++    QVariantMap qmap;
++    if (!gHashTableToQVariantMap(map, qmap))
++        return Encryptor::SerializationTypeIsNotSupported;
++
++    Encryptor encryptor;
++    QVariantMap qdecrypted_map = encryptor.decodeVariantMap(qmap, pid);
++    if (encryptor.status() != Encryptor::Ok)
++        return (int)encryptor.status();
++
++    if (!qVariantMapToGHashTable(qdecrypted_map, decrypted_map))
++        return Encryptor::SerializationTypeIsNotSupported;
++
++    return 0;
++}
++
++static int internal_signon_encrypt_string(const gchar *string, gchar **encrypted_string, pid_t pid)
++{
++    QString qstring = QString::fromUtf8(string);
++
++    Encryptor encryptor;
++    QString qencrypted_string = encryptor.encodeString(qstring, pid);
++    if (encryptor.status() != Encryptor::Ok)
++        return (int)encryptor.status();
++
++    QByteArray utf8 = qencrypted_string.toUtf8();
++    *encrypted_string = (gchar *)g_malloc(utf8.length() + 1);
++    if (!*encrypted_string)
++        return Encryptor::SerializationTypeIsNotSupported;
++    g_stpcpy(*encrypted_string, utf8.constData());
++
++    return 0;
++}
++
++static int internal_signon_decrypt_string(const gchar *string, gchar **decrypted_string, pid_t pid)
++{
++    QString qstring = QString::fromUtf8(string);
++
++    Encryptor encryptor;
++    QString qdecrypted_string = encryptor.decodeString(qstring, pid);
++    if (encryptor.status() != Encryptor::Ok)
++        return (int)encryptor.status();
++
++    QByteArray utf8 = qdecrypted_string.toUtf8();
++    *decrypted_string = (gchar *)g_malloc(utf8.length() + 1);
++    if (!*decrypted_string)
++        return Encryptor::SerializationTypeIsNotSupported;
++    g_stpcpy(*decrypted_string, utf8.constData());
++
++    return 0;
++}
+--- libsignoncrypto-qt-1.3.orig/lib/tests/test.h
++++ libsignoncrypto-qt-1.3/lib/tests/test.h
+@@ -37,6 +37,9 @@
+     void sessionDataTest();
+     void stringTest();
+ 
++    void glibMapTest();
++    void glibStringTest();
++
+ private:
+ };
+ 
+--- libsignoncrypto-qt-1.3.orig/lib/tests/tests.pro
++++ libsignoncrypto-qt-1.3/lib/tests/tests.pro
+@@ -19,6 +19,9 @@
+ QT += core
+ QT -= gui
+ 
++PKGCONFIG += gobject-2.0 \
++             glib-2.0
++
+ QMAKE_LIBDIR += $${TOP_SRC_DIR}/lib/SignOnCrypto
+ LIBS += -lsignoncrypto-qt
+ 
+--- libsignoncrypto-qt-1.3.orig/lib/tests/test.cpp
++++ libsignoncrypto-qt-1.3/lib/tests/test.cpp
+@@ -150,10 +150,12 @@
+     g_value_set_static_string(user_name, "user_x");
+     gchar *user_name_key = g_strdup("UserName");
+     g_hash_table_insert(map, user_name_key, user_name);
++
+     GHashTable *encrypted_map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                       g_free, signon_free_gvalue);
+     int status = signon_encrypt_hash_table(map, encrypted_map, 0);
+     QVERIFY(status == 0);
++
+     GHashTable *decrypted_map = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                       g_free, signon_free_gvalue);
+     status = signon_decrypt_hash_table(encrypted_map, decrypted_map, 0);
