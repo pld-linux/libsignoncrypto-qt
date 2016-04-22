@@ -6,12 +6,13 @@ Version:	1.3.1
 Release:	1
 License:	LGPL v2.1
 Group:		Libraries
-#Source0Download: http://code.google.com/p/accounts-sso/downloads/list
+#Source0Download: https://gitlab.com/accounts-sso/libsignoncrypto-qt/tags
+#Source0:	https://gitlab.com/accounts-sso/libsignoncrypto-qt/repository/archive.tar.bz2?ref=%{version}
 Source0:	http://accounts-sso.googlecode.com/files/%{name}-%{version}.tar.gz
 # Source0-md5:	4bbeb8861569cf1008408adabc6d8df3
 # fragments from http://depot.javispedro.com/nit/harm/srcs/pool/free/libs/libsignoncrypto-qt/libsignoncrypto-qt_1.3-1+0m8.diff.gz (changes existing on harmattan branch)
 Patch0:		%{name}-harmattan.patch
-URL:		http://code.google.com/p/accounts-sso/
+URL:		https://gitlab.com/accounts-sso/libsignoncrypto-qt
 BuildRequires:	QtCore-devel >= 4
 BuildRequires:	doxygen
 BuildRequires:	dbus-glib-devel
