@@ -55,7 +55,7 @@ Dokumentacja API biblioteki libsignoncrypto-qt.
 
 %prep
 %setup -q
-%patch0 -p1
+%patch -P0 -p1
 
 %build
 qmake-qt4 libsignoncrypto-qt.pro \
